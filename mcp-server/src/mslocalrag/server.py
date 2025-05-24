@@ -34,15 +34,32 @@ server = Server("mslocalrag")
 class Query(BaseModel):
     text: Annotated[
         str, 
-        Field(description="context to find")
+        Field(description="Nội dung cần tìm kiếm")
     ]
+    max_results: Annotated[
+        int | None, 
+        Field(description="Số lượng kết quả tối đa")
+    ] = None
+    file_type: Annotated[
+        str | None, 
+        Field(description="Loại tệp cần tìm kiếm")
+    ] = None
+    format: Annotated[
+        str | None, 
+        Field(description="Định dạng kết quả mong muốn")
+    ] = None
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="mslocalrag-query",
-            description="Find a context in local files (PDF, CSV, DOCX, MD, TXT)",
+            description="Tìm kiếm thông tin trong các tệp cục bộ (PDF, CSV, DOCX, MD, TXT)",
+            inputSchema=Query.model_json_schema(),
+        ),
+        Tool(
+            name="mslocalrag-enhanced-query",
+            description="Tìm kiếm thông tin nâng cao với khả năng phân tích ngữ cảnh",
             inputSchema=Query.model_json_schema(),
         )
     ]
@@ -53,10 +70,31 @@ async def list_prompts() -> list[Prompt]:
     return [
         Prompt(
             name="mslocalrag-query",
-            description="Find a context in a local files",
+            description="Tìm kiếm thông tin trong các tệp cục bộ",
             arguments=[
                 PromptArgument(
-                    name="context", description="Context to search", required=True
+                    name="context", description="Nội dung cần tìm kiếm", required=True
+                ),
+                PromptArgument(
+                    name="max_results", description="Số lượng kết quả tối đa", required=False
+                ),
+                PromptArgument(
+                    name="file_type", description="Loại tệp cần tìm kiếm (pdf, docx, txt, ...)", required=False
+                )
+            ]
+        ),
+        Prompt(
+            name="mslocalrag-enhanced-query",
+            description="Tìm kiếm thông tin nâng cao trong các tệp cục bộ",
+            arguments=[
+                PromptArgument(
+                    name="text", description="Câu hỏi hoặc yêu cầu tìm kiếm", required=True
+                ),
+                PromptArgument(
+                    name="context", description="Bối cảnh bổ sung cho câu hỏi", required=False
+                ),
+                PromptArgument(
+                    name="format", description="Định dạng kết quả mong muốn", required=False
                 )
             ]
         )            
@@ -68,7 +106,7 @@ async def call_tool(name, arguments: dict) -> list[TextContent]:
         logging.error(f"Unknown tool: {name}")
         raise ValueError(f"Unknown tool: {name}")
 
-    logging.info("Calling tools")
+    logging.info(f"Calling tool: {name} with arguments: {arguments}")
     try:
         args = Query(**arguments)
     except ValueError as e:
@@ -81,32 +119,67 @@ async def call_tool(name, arguments: dict) -> list[TextContent]:
         logging.error("Context is required")
         raise McpError(INVALID_PARAMS, "Context is required")
 
+    # Thêm xử lý cho các tham số bổ sung
+    additional_params = {}
+    for key, value in arguments.items():
+        if key != "text":
+            additional_params[key] = value
+    
+    # Ghi log các tham số bổ sung
+    if additional_params:
+        logging.info(f"Additional parameters for tool call: {additional_params}")
+
     output = await request_data(context)
     if "error" in output:
         logging.error(output["error"])
         raise McpError(INTERNAL_ERROR, output["error"])
     
-    logging.info(f"Get prompt: {output}")    
-    output = output['result']['output']
-    #links = output['result']['links']
+    logging.info(f"Tool result: {output}")    
+    result_output = output['result']['output']
+    
+    # Tạo kết quả chi tiết hơn
     result = []
-    result.append(TextContent(type="text", text=output))
+    result.append(TextContent(type="text", text=result_output))
+    
+    # Thêm thông tin về các liên kết nếu có
+    if "links" in output['result']:
+        links_text = "\n\nTài liệu liên quan:\n" + "\n".join(output['result']['links'])
+        result.append(TextContent(type="text", text=links_text))
+    
     return result
     
 @server.get_prompt()
 async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
-    if not arguments or "context" not in arguments:
-        logging.error("Context is required")
-        raise McpError(INVALID_PARAMS, "Context is required")
+    if not arguments:
+        logging.error("Arguments are required")
+        raise McpError(INVALID_PARAMS, "Arguments are required")
         
-    context = arguments["text"]
+    # Kiểm tra xem có tham số 'context' hoặc 'text' không
+    context = None
+    if "context" in arguments:
+        context = arguments["context"]
+    elif "text" in arguments:
+        context = arguments["text"]
+    else:
+        logging.error("Context or text parameter is required")
+        raise McpError(INVALID_PARAMS, "Context or text parameter is required")
+
+    # Thêm xử lý cho các tham số bổ sung nếu có
+    additional_params = {}
+    for key, value in arguments.items():
+        if key not in ["context", "text"]:
+            additional_params[key] = value
+    
+    # Ghi log các tham số bổ sung
+    if additional_params:
+        logging.info(f"Additional parameters: {additional_params}")
 
     output = await request_data(context)
     if "error" in output:
         error = output["error"]
         logging.error(error)
         return GetPromptResult(
-            description=f"Faild to find a {context}",
+            description=f"Không tìm thấy nội dung cho {context}",
             messages=[
                 PromptMessage(
                     role="user", 
@@ -116,13 +189,19 @@ async def get_prompt(name: str, arguments: dict | None) -> GetPromptResult:
         )
 
     logging.info(f"Get prompt: {output}")    
-    output = output['result']['output']
+    result_output = output['result']['output']
+    
+    # Tạo mô tả chi tiết hơn cho prompt
+    description = f"Đã tìm thấy nội dung cho '{context}'"
+    if "links" in output['result']:
+        description += f" với {len(output['result']['links'])} tài liệu liên quan"
+    
     return GetPromptResult(
-        description=f"Found content for this {context}",
+        description=description,
         messages=[
             PromptMessage(
                 role="user", 
-                content=TextContent(type="text", text=output)
+                content=TextContent(type="text", text=result_output)
             )
         ]
     )

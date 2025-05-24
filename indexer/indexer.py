@@ -56,8 +56,8 @@ class Config:
     EMBEDDING_MODEL_ID = os.environ.get("EMBEDDING_MODEL_ID")
     EMBEDDING_SIZE = os.environ.get("EMBEDDING_SIZE")
     
-    CHUNK_SIZE = 500
-    CHUNK_OVERLAP = 200
+    CHUNK_SIZE = 512
+    CHUNK_OVERLAP = 100
 
 class Indexer:
     def __init__(self):
@@ -73,8 +73,13 @@ class Indexer:
     def _initialize_embeddings(self) -> HuggingFaceEmbeddings:
         return HuggingFaceEmbeddings(
             model_name=self.config.EMBEDDING_MODEL_ID,
-            model_kwargs={'device': self.config.DEVICE},
-            encode_kwargs={'normalize_embeddings': False}
+            model_kwargs={
+                'device': self.config.DEVICE
+            },
+            encode_kwargs={
+                'normalize_embeddings': False,
+                'batch_size': 1
+            }
         )
 
     def _initialize_text_splitter(self) -> RecursiveCharacterTextSplitter:
@@ -122,11 +127,21 @@ class Indexer:
             for doc in documents:
                 doc.metadata['file_path'] = loader.file_path
 
-            uuids = [str(uuid.uuid4()) for _ in range(len(documents))]
-            ids = self.document_store.add_documents(documents=documents, ids=uuids)
+            # Xử lý theo batch để giảm sử dụng bộ nhớ
+            batch_size = 2
+            all_ids = []
             
-            logger.info(f"Successfully processed {len(ids)} documents from {loader.file_path}")
-            return ids
+            for i in range(0, len(documents), batch_size):
+                batch = documents[i:i+batch_size]
+                uuids = [str(uuid.uuid4()) for _ in range(len(batch))]
+                ids = self.document_store.add_documents(documents=batch, ids=uuids)
+                all_ids.extend(ids)
+                # Gợi ý garbage collector chạy
+                import gc
+                gc.collect()
+            
+            logger.info(f"Successfully processed {len(all_ids)} documents from {loader.file_path}")
+            return all_ids
             
         except Exception as e:
             logger.error(f"Error processing file {loader.file_path}: {str(e)}")

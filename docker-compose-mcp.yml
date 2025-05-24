@@ -39,3 +39,9 @@ services:
       - CONTAINER_PATH=/usr/src/app/local_files/
     depends_on:
       - qdrant
+    deploy:
+      resources:
+        limits:
+          memory: 2.5G
+        reservations:
+          memory: 1.5G
